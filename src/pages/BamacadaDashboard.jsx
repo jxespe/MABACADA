@@ -201,6 +201,57 @@ export default function BamacadaDashboard() {
     }
     return best;
   }
+  function computeETAFromRoute(unitPosition) {
+    const pts = routePoints.current;
+    if (!pts.length) return null;
+
+    // 1) Find nearest index
+    let idx = 0;
+    let min = Infinity;
+
+    pts.forEach((p, i) => {
+      const d = (p.lat - unitPosition.lat) ** 2 + (p.lng - unitPosition.lng) ** 2;
+      if (d < min) {
+        min = d;
+        idx = i;
+      }
+    });
+
+    // 2) Compute remaining path distance
+    let dist = 0;
+    for (let i = idx; i < pts.length - 1; i++) {
+      const A = pts[i];
+      const B = pts[i + 1];
+      dist += window.google.maps.geometry.spherical.computeDistanceBetween(
+        new window.google.maps.LatLng(A.lat, A.lng),
+        new window.google.maps.LatLng(B.lat, B.lng)
+      );
+    }
+
+    // 3) Convert to minutes (speed ~30km/h → 8.33 m/s)
+    const seconds = dist / 8.33;
+    return Math.round(seconds / 60) + " min";
+  }
+  // -----------------------------------------------------
+  // Write ETA into Firestore for each unit
+  // -----------------------------------------------------
+  useEffect(() => {
+    if (!units.length || !routePoints.current.length || !window.google) return;
+
+    units.forEach(async (u) => {
+      if (!u.lat || !u.lng) return;
+
+      const eta = computeETAFromRoute({ lat: u.lat, lng: u.lng });
+      if (!eta) return;
+
+      try {
+        await updateDoc(doc(db, "units", u.id), { eta });
+      } catch (err) {
+        console.warn("ETA update failed:", err);
+      }
+    });
+  }, [units]);
+
 
   // ----------------------------
   // Update markers on map (snap + show plate via InfoWindow on hover)
