@@ -387,6 +387,7 @@ export default function BamacadaDashboard() {
       for (const docSnap of all.docs) {
         const d = docSnap.data();
         const seats = d?.seats || {};
+        
         const reserved = seats.reserved || {};
         const prev = reserved?.[USER_ID];
         if (prev != null && docSnap.id !== targetUnitId) {
@@ -563,32 +564,58 @@ async function confirmReservation(unitId, seatNumber) {
               </div>
             </div>
 
-            {/* Seat map */}
-            <div>
-              <div className="font-semibold text-sm">Seat Map</div>
-              <div className="grid grid-cols-5 gap-2 mt-2">
-                {Array.from({ length: active.seats?.total ?? 25 }).map((_, i) => {
-                  const num = i + 1;
-                  const s = seatState(active, num);
-                  // choose classes
-                  const base = "w-10 h-10 flex items-center justify-center text-xs rounded cursor-pointer select-none";
-                  let cls = "bg-white border";
-                  if (s === "taken") cls = "bg-blue-600 text-white";
-                  if (s === "reservedByMe") cls = "bg-green-500 text-white";
-                  // available: white with border
-                  return (
-                    <div
-                      key={num}
-                      className={`${base} ${cls}`}
-                      onClick={() => onSeatClick(active, num)}
-                      title={s === "available" ? "Click to reserve" : s === "reservedByMe" ? "Click to cancel" : "Taken"}
-                    >
-                      {num}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+{/* Seat map */}
+<div>
+  <div className="font-semibold text-sm">Seat Map</div>
+
+  <div className="grid grid-cols-5 gap-2 mt-2">
+    {(() => {
+      let seatNumber = 1; // counter for REAL seats
+
+      return Array.from({ length: active.seats?.total ?? 25 + 5 }).map((_, i) => {
+        const col = (i % 5) + 1;
+
+        // Column 3 = aisle
+        if (col === 3) {
+          return <div key={`aisle-${i}`} className="w-10 h-10"></div>;
+        }
+
+        // If we already used all seat numbers, stop rendering seats
+        if (seatNumber > (active.seats?.total ?? 25)) {
+          return <div key={`extra-${i}`} className="w-10 h-10"></div>;
+        }
+
+        const num = seatNumber++;
+        const s = seatState(active, num);
+
+        const base =
+          "w-10 h-10 flex items-center justify-center text-xs rounded cursor-pointer select-none";
+        let cls = "bg-white border";
+
+        if (s === "taken") cls = "bg-blue-600 text-white";
+        if (s === "reservedByMe") cls = "bg-green-500 text-white";
+
+        return (
+          <div
+            key={num}
+            className={`${base} ${cls}`}
+            onClick={() => onSeatClick(active, num)}
+            title={
+              s === "available"
+                ? "Click to reserve"
+                : s === "reservedByMe"
+                ? "Click to cancel"
+                : "Taken"
+            }
+          >
+            {num}
+          </div>
+        );
+      });
+    })()}
+  </div>
+</div>
+
 
             {/* Buttons */}
             <div className="mt-4 space-y-2">
