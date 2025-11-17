@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Google Map must always be behind UI */
+#map-container-map,
+#map-container-map * {
+  z-index: 0 !important;
+}
+
+.gm-style,
+.gm-style * {
+  z-index: 0 !important;
+}
