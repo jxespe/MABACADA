@@ -318,16 +318,26 @@ export default function BamacadaDashboard() {
   // Helper: seat state & click handling
   // ----------------------------
   function seatState(unit, seatNumber) {
-    // unit.seats expected shape:
-    // { total: 25, taken: [1,2], reserved: { userId: seatNumber } }
-    const seats = unit?.seats || {};
-    const taken = Array.isArray(seats.taken) ? seats.taken : [];
-    const reserved = seats.reserved || {};
-    if (reserved && reserved[USER_ID] === seatNumber) return "reservedByMe";
-    if (taken.includes(seatNumber)) return "taken";
-    // reserved by other user (map contains value equal to seatNumber)
-    const reservedByOther = Object.entries(reserved).some(([uid, num]) => uid !== USER_ID && num === seatNumber);
-    if (reservedByOther) return "taken";
+    if (!unit?.seats) return "available";
+
+    const taken = (unit.seats.taken || []).map(Number);
+    const reserved = unit.seats.reserved || {};
+
+    // Normalize
+    const mySeat = Number(reserved[USER_ID]);
+
+    // YOUR reservation
+    if (mySeat === Number(seatNumber)) return "reservedByMe";
+
+    // Reserved by others
+    const reservedByOthers = Object.entries(reserved).some(
+      ([uid, num]) => uid !== USER_ID && Number(num) === Number(seatNumber)
+    );
+
+    if (taken.includes(Number(seatNumber)) || reservedByOthers) {
+      return "taken";
+    }
+
     return "available";
   }
 
@@ -564,63 +574,85 @@ async function confirmReservation(unitId, seatNumber) {
               </div>
             </div>
 
-{/* Seat map */}
-<div>
-  <div className="font-semibold text-sm">Seat Map</div>
+            {/* Seat map */}
+            <div>
+              <div className="font-semibold text-sm">Seat Map</div>
 
-  <div className="grid grid-cols-5 gap-2 mt-2">
-    {(() => {
-      let seatNumber = 1; // counter for REAL seats
+              <div className="grid grid-cols-5 gap-2 mt-2">
+                {(() => {
+                  let seatNumber = 1; // counter for REAL seats
 
-      return Array.from({ length: active.seats?.total ?? 25 + 5 }).map((_, i) => {
-        const col = (i % 5) + 1;
+                  return Array.from({ length: active.seats?.total ?? 25 + 5 }).map((_, i) => {
+                    const col = (i % 5) + 1;
 
-        // Column 3 = aisle
-        if (col === 3) {
-          return <div key={`aisle-${i}`} className="w-10 h-10"></div>;
-        }
+                    // Column 3 = aisle
+                    if (col === 3) {
+                      return <div key={`aisle-${i}`} className="w-10 h-10"></div>;
+                    }
 
-        // If we already used all seat numbers, stop rendering seats
-        if (seatNumber > (active.seats?.total ?? 25)) {
-          return <div key={`extra-${i}`} className="w-10 h-10"></div>;
-        }
+                    // If we already used all seat numbers, stop rendering seats
+                    if (seatNumber > (active.seats?.total ?? 25)) {
+                      return <div key={`extra-${i}`} className="w-10 h-10"></div>;
+                    }
 
-        const num = seatNumber++;
-        const s = seatState(active, num);
+                    const num = seatNumber++;
+                    const s = seatState(active, num);
 
-        const base =
-          "w-10 h-10 flex items-center justify-center text-xs rounded cursor-pointer select-none";
-        let cls = "bg-white border";
+                    const base =
+                      "w-10 h-10 flex items-center justify-center text-xs rounded cursor-pointer select-none";
+                    let cls = "bg-white border";
 
-        if (s === "taken") cls = "bg-blue-600 text-white";
-        if (s === "reservedByMe") cls = "bg-green-500 text-white";
+                    if (s === "taken") cls = "bg-blue-600 text-white";
+                    if (s === "reservedByMe") cls = "bg-green-500 text-black";
 
-        return (
-          <div
-            key={num}
-            className={`${base} ${cls}`}
-            onClick={() => onSeatClick(active, num)}
-            title={
-              s === "available"
-                ? "Click to reserve"
-                : s === "reservedByMe"
-                ? "Click to cancel"
-                : "Taken"
-            }
-          >
-            {num}
-          </div>
-        );
-      });
-    })()}
-  </div>
-</div>
+                    return (
+                      <div
+                        key={num}
+                        className={`${base} ${cls}`}
+                        onClick={() => onSeatClick(active, num)}
+                        title={
+                          s === "available"
+                            ? "Click to reserve"
+                            : s === "reservedByMe"
+                            ? "Click to cancel"
+                            : "Taken"
+                        }
+                      >
+                        {num}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+              {/* Legend */}
+              <div className="mt-3 space-y-2 text-xs">
+
+                {/* Available */}
+                <div className="flex items-center gap-1">
+                  <div
+                    className="rounded border bg-white"
+                    style={{ width: "43px", height: "18px", display: "inline-block" }}
+                  ></div>
+                  <span>Available</span>
+                </div>
+
+                {/* Taken */}
+                <div className="flex items-center gap-1">
+                  <div
+                    className="rounded border bg-blue-600"
+                    style={{ width: "43px", height: "18px", display: "inline-block" }}
+                  ></div>
+                  <span>Taken</span>
+                </div>
+              </div>
 
 
+
+            </div>
             {/* Buttons */}
             <div className="mt-4 space-y-2">
               <button onClick={() => (active.phone ? window.open(`tel:${active.phone}`) : null)} className="mt-2 py-2 bg-blue-600 text-white w-full rounded">
-                Call Driver
+                Driver Info
               </button>
               <button
                 onClick={() => {
