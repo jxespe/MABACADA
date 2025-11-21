@@ -11,10 +11,17 @@ import BamacadaDashboard from "./pages/BamacadaDashboard";
 import Account from "./pages/Account";
 import Settings from "./pages/Settings";
 
+import DriverDetailsPage from "./pages/DriverDetailsPage";
+
+
+
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+
+        <Route path="/dashboard" element={<BamacadaDashboard />} />
+        <Route path="/driver/:id" element={<DriverDetailsPage />} />
 
         {/* Default route */}
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

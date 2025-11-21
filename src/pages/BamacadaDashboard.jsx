@@ -1,7 +1,24 @@
 // src/BamacadaDashboard.jsx
-// ------------------------------------------------------
-// GLOBAL CONSTANTS OUTSIDE COMPONENT
-// ------------------------------------------------------
+// Updated: migrate markers to AdvancedMarkerElement + https SVG icons + misc fixes
+/* IMPORTANT: For best performance, update how you load the Maps API in your HTML:
+   <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_KEY&libraries=geometry&loading=async" defer></script>
+*/
+
+import { useNavigate } from "react-router-dom";
+import { getAuth, signOut } from "firebase/auth";
+import React, { useEffect, useRef, useState } from "react";
+import { db } from "../firebase";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  getDocs,
+  updateDoc,
+  deleteField,
+  runTransaction,
+} from "firebase/firestore";
+
+// ---------- CONSTANTS ----------
 const WAYPOINTS = [
   { location: { lat: 15.9206, lng: 120.4157 } }, // Malasiqui
   { location: { lat: 16.0117, lng: 120.3570 } }, // Calasiao
@@ -20,7 +37,10 @@ const ROUTE_COLORS = {
   default: "#16a34a",
 };
 
-// Simple marker SVG used for map markers (unchanged)
+// ---------- Test user ----------
+const USER_ID = "testUser1";
+
+// ---------- Helper: create marker SVG (data URL) ----------
 function createMarkerSVG(color, online = true, heading = 0) {
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44">
@@ -36,22 +56,29 @@ function createMarkerSVG(color, online = true, heading = 0) {
   return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
 }
 
-import { useNavigate } from "react-router-dom";
-import { getAuth, signOut } from "firebase/auth";
-import React, { useEffect, useRef, useState } from "react";
-import { db } from "../firebase";
-import {
-  collection,
-  doc,
-  onSnapshot,
-  getDocs,
-  updateDoc,
-  deleteField,
-  runTransaction,
-} from "firebase/firestore";
+// Create a DOM element to be used as AdvancedMarker content
+function createMarkerElement(svgDataUrl, size = 44, isSelected = false) {
+  const container = document.createElement("div");
+  container.className = "bam-marker";
+  container.style.width = `${size}px`;
+  container.style.height = `${size}px`;
+  container.style.display = "flex";
+  container.style.alignItems = "center";
+  container.style.justifyContent = "center";
+  container.style.cursor = "pointer";
+  container.style.transform = isSelected ? "scale(1.35)" : "none";
+  // add a subtle shadow/glow for selected
+  container.style.filter = isSelected ? "drop-shadow(0 6px 10px rgba(0,0,0,0.2))" : "none";
 
-// ---------- TEST USER (per your selection) ----------
-const USER_ID = "testUser1";
+  const img = document.createElement("img");
+  img.src = svgDataUrl;
+  img.style.width = "100%";
+  img.style.height = "100%";
+  img.style.display = "block";
+  container.appendChild(img);
+
+  return container;
+}
 
 // ------------------------------------------------------
 // MAIN COMPONENT
@@ -66,11 +93,10 @@ export default function BamacadaDashboard() {
   const [confirmSeat, setConfirmSeat] = useState(null);
   const [confirmUnitId, setConfirmUnitId] = useState(null);
 
-  
   const navigate = useNavigate();
   const auth = getAuth();
   const map = useRef(null);
-  const markers = useRef({});
+  const markers = useRef({}); // stores marker instances keyed by unit id
   const dirService = useRef(null);
   const dirRenderer = useRef(null);
   const routePoints = useRef([]);
@@ -119,22 +145,21 @@ export default function BamacadaDashboard() {
           polylineOptions: { strokeColor: "#22c55e", strokeWeight: 5 },
         });
 
-        // ---------- LOCATION PINS ----------
+        // ---------- LOCATION PINS (use https icons) ----------
         [
           { pos: BAYAMBANG, title: "Bayambang Terminal", color: "red" },
           { pos: WAYPOINTS[0].location, title: "Malasiqui", color: "blue" },
           { pos: WAYPOINTS[1].location, title: "Calasiao", color: "orange" },
           { pos: DAGUPAN, title: "Dagupan City", color: "green" },
         ].forEach((t) => {
-          // keep simple marker + label
           const m = new window.google.maps.Marker({
             map: map.current,
             position: t.pos,
             title: t.title,
-            icon: { url: `http://maps.google.com/mapfiles/ms/icons/${t.color}-dot.png` },
+            // use https icons
+            icon: { url: `https://maps.google.com/mapfiles/ms/icons/${t.color}-dot.png` },
           });
           const iw = new window.google.maps.InfoWindow({ content: `<div style="font-size:12px">${t.title}</div>` });
-          // show label initially
           iw.open({ map: map.current, anchor: m });
           m.addListener("click", () => iw.open({ map: map.current, anchor: m }));
         });
@@ -163,9 +188,8 @@ export default function BamacadaDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-
-   // ----------------------------
-  // Math helpers for snapping to route
+  // ----------------------------
+  // Geometry helpers (unchanged)
   // ----------------------------
   function projectToSegment(A, B, P) {
     const ax = A.lng,
@@ -232,6 +256,7 @@ export default function BamacadaDashboard() {
     const seconds = dist / 8.33;
     return Math.round(seconds / 60) + " min";
   }
+
   // -----------------------------------------------------
   // Write ETA into Firestore for each unit
   // -----------------------------------------------------
@@ -252,70 +277,129 @@ export default function BamacadaDashboard() {
     });
   }, [units]);
 
-
   // ----------------------------
   // Update markers on map (snap + show plate via InfoWindow on hover)
   // ----------------------------
   useEffect(() => {
-  if (!map.current || !window.google) return;
+    if (!map.current || !window.google) return;
 
-  const now = Date.now();
-  const activeIds = new Set(units.map((u) => u.id));
+    const now = Date.now();
+    const activeIds = new Set(units.map((u) => u.id));
 
-  // remove missing markers
-  Object.keys(markers.current).forEach((id) => {
-    if (!activeIds.has(id)) {
-      try { markers.current[id].setMap(null); } catch (_) {}
-      delete markers.current[id];
-    }
-  });
+    // remove missing markers
+    Object.keys(markers.current).forEach((id) => {
+      if (!activeIds.has(id)) {
+        try {
+          const existing = markers.current[id];
+          // remove from map
+          if (existing?.setMap) {
+            existing.setMap(null);
+          } else {
+            // AdvancedMarkerElement may not have setMap; try setting map property to null
+            try { existing.map = null; } catch (_) {}
+          }
+        } catch (_) {}
+        delete markers.current[id];
+      }
+    });
 
-  units.forEach((u) => {
-    if (!u.lat || !u.lng) return;
-    const snapped = nearestPointOnRoute({ lat: u.lat, lng: u.lng });
-    const last = u.lastUpdated?.toMillis?.() ?? u.lastUpdated ?? 0;
-    const online = now - last < OFFLINE_MS;
+    units.forEach((u) => {
+      if (!u.lat || !u.lng) return;
+      const snapped = nearestPointOnRoute({ lat: u.lat, lng: u.lng });
+      const last = u.lastUpdated?.toMillis?.() ?? u.lastUpdated ?? 0;
+      const online = now - last < OFFLINE_MS;
 
-    // ⭐ HIGHLIGHT IF SELECTED
-    const isSelected = selectedId === u.id;
+      // HIGHLIGHT IF SELECTED
+      const isSelected = selectedId === u.id;
 
-    // make selected marker bigger + glow
-    const scale = isSelected ? 60 : 44;
+      // scale when selected
+      const scale = isSelected ? 60 : 44;
 
-    const color = ROUTE_COLORS[u.route] || ROUTE_COLORS.default;
-    const icon = {
-      url: createMarkerSVG(color, online, u.heading ?? 0),
-      scaledSize: new window.google.maps.Size(scale, scale),
-    };
+      const color = ROUTE_COLORS[u.route] || ROUTE_COLORS.default;
+      const svgUrl = createMarkerSVG(color, online, u.heading ?? 0);
 
-    if (!markers.current[u.id]) {
-      const m = new window.google.maps.Marker({
-        position: snapped,
-        map: map.current,
-        icon,
-        optimized: false,
+      // If marker exists, remove it and re-create so we can update styling easily
+      if (markers.current[u.id]) {
+        try {
+          const existing = markers.current[u.id];
+          if (existing?.setMap) existing.setMap(null);
+          else existing.map = null;
+        } catch (err) {
+          // ignore
+        }
+        delete markers.current[u.id];
+      }
+
+      // create element content
+      const element = createMarkerElement(svgUrl, scale, isSelected);
+
+      // attach click handler to the DOM element
+      element.addEventListener("click", () => {
+        // navigate to driver details page (separate page)
+        navigate(`/driver/${u.id}`);
       });
 
-      m.addListener("click", () => {
-        setSelectedId(u.id);
-        setLeftOpen(true);
-        map.current.panTo(snapped);
-        map.current.setZoom(15);
-      });
+      // create AdvancedMarkerElement if available, else fallback to Marker
+      try {
+        if (window.google.maps.marker && window.google.maps.marker.AdvancedMarkerElement) {
+          const advMarker = new window.google.maps.marker.AdvancedMarkerElement({
+            map: map.current,
+            position: snapped,
+            title: u.plate ?? u.id,
+            // AdvancedMarkerElement uses 'content' option for DOM element
+            content: element,
+          });
+          markers.current[u.id] = advMarker;
+        } else {
+          // fallback using classic Marker with icon data URL
+          const markerIcon = {
+            url: svgUrl,
+            scaledSize: new window.google.maps.Size(scale, scale),
+          };
 
-      markers.current[u.id] = m;
-    } else {
-      markers.current[u.id].setPosition(snapped);
-      markers.current[u.id].setIcon(icon); // ⭐ UPDATE ICON (highlight)
-    }
-  });
-}, [units, selectedId]);   // ⭐ ADD selectedId
+          const marker = new window.google.maps.Marker({
+            map: map.current,
+            position: snapped,
+            icon: markerIcon,
+            title: u.plate ?? u.id,
+            optimized: false,
+          });
 
+          marker.addListener("click", () => {
+            navigate(`/driver/${u.id}`);
+          });
+
+          markers.current[u.id] = marker;
+        }
+      } catch (err) {
+        // defensive fallback: classic Marker
+        console.warn("Marker creation error, falling back to Marker:", err);
+        const markerIcon = {
+          url: svgUrl,
+          scaledSize: new window.google.maps.Size(scale, scale),
+        };
+
+        const marker = new window.google.maps.Marker({
+          map: map.current,
+          position: snapped,
+          icon: markerIcon,
+          title: u.plate ?? u.id,
+          optimized: false,
+        });
+
+        marker.addListener("click", () => {
+          navigate(`/driver/${u.id}`);
+        });
+
+        markers.current[u.id] = marker;
+      }
+    });
+  }, [units, selectedId, navigate]);
 
   const active = selectedUnit ?? units.find((u) => u.id === selectedId) ?? units[0] ?? null;
 
   // ----------------------------
-  // Helper: seat state & click handling
+  // Seat state & click handling
   // ----------------------------
   function seatState(unit, seatNumber) {
     if (!unit?.seats) return "available";
@@ -323,13 +407,10 @@ export default function BamacadaDashboard() {
     const taken = (unit.seats.taken || []).map(Number);
     const reserved = unit.seats.reserved || {};
 
-    // Normalize
     const mySeat = Number(reserved[USER_ID]);
 
-    // YOUR reservation
     if (mySeat === Number(seatNumber)) return "reservedByMe";
 
-    // Reserved by others
     const reservedByOthers = Object.entries(reserved).some(
       ([uid, num]) => uid !== USER_ID && Number(num) === Number(seatNumber)
     );
@@ -352,7 +433,6 @@ export default function BamacadaDashboard() {
         const reserved = seats.reserved || {};
         const prevSeat = reserved?.[USER_ID];
         if (prevSeat != null) {
-          // attempt cleanup (non-blocking)
           updates.push(
             updateDoc(doc(db, "units", d.id), {
               [`seats.reserved.${USER_ID}`]: deleteField(),
@@ -363,7 +443,7 @@ export default function BamacadaDashboard() {
       });
       await Promise.all(updates);
 
-      // 2) Try to reserve seat in target unit using transaction (to avoid race)
+      // 2) transaction to reserve
       await runTransaction(db, async (t) => {
         const uRef = doc(db, "units", targetUnitId);
         const uSnap = await t.get(uRef);
@@ -374,46 +454,38 @@ export default function BamacadaDashboard() {
         const taken = Array.isArray(seats.taken) ? [...seats.taken] : [];
         const reserved = seats.reserved ? { ...seats.reserved } : {};
 
-        // If seat is taken by others (different from our previous reservation), fail
         if (taken.includes(seatNumber) && reserved[USER_ID] !== seatNumber) {
           throw new Error("Seat already taken");
         }
 
-        // clear any previous reservation by this user in this unit (if any)
         const prevSeatThisUnit = reserved?.[USER_ID];
         if (prevSeatThisUnit && prevSeatThisUnit !== seatNumber) {
-          // remove old seat entry from taken
           const newTaken = taken.filter((s) => s !== prevSeatThisUnit);
           t.update(uRef, { "seats.taken": newTaken, [`seats.reserved.${USER_ID}`]: seatNumber });
         } else {
-          // normal case: add seatNumber to taken if not present and set reserved map
           const newTaken = taken.includes(seatNumber) ? taken : [...taken, seatNumber];
           t.update(uRef, { "seats.taken": newTaken, [`seats.reserved.${USER_ID}`]: seatNumber });
         }
       });
 
-      // 3) Now ensure previous reservations on other units are removed (cleanup)
+      // 3) cleanup other units
       const all = await getDocs(collection(db, "units"));
       for (const docSnap of all.docs) {
         const d = docSnap.data();
         const seats = d?.seats || {};
-        
         const reserved = seats.reserved || {};
         const prev = reserved?.[USER_ID];
         if (prev != null && docSnap.id !== targetUnitId) {
-          // remove reservation from that doc
           try {
             await updateDoc(doc(db, "units", docSnap.id), {
               [`seats.reserved.${USER_ID}`]: deleteField(),
               "seats.taken": (Array.isArray(seats.taken) ? seats.taken.filter((s) => s !== prev) : []),
             });
           } catch (e) {
-            // ignore non-critical update errors
+            // ignore
           }
         }
       }
-
-      // success (UI updates via onSnapshot)
     } catch (err) {
       alert(err.message ?? "Reserve failed");
       console.error("reserveSeat error:", err);
@@ -430,7 +502,7 @@ export default function BamacadaDashboard() {
         const seats = data?.seats || {};
         const reserved = seats.reserved || {};
         const mySeat = reserved?.[USER_ID];
-        if (!mySeat) return; // nothing to cancel
+        if (!mySeat) return;
         const newTaken = Array.isArray(seats.taken) ? seats.taken.filter((s) => s !== mySeat) : [];
         t.update(uRef, { [`seats.reserved.${USER_ID}`]: deleteField(), "seats.taken": newTaken });
       });
@@ -440,248 +512,83 @@ export default function BamacadaDashboard() {
     }
   }
 
-  // Seat click handler used in seat grid
   function onSeatClick(unit, seatNum) {
-  const state = seatState(unit, seatNum);
+    const state = seatState(unit, seatNum);
 
-  if (state === "available") {
-    // step 1: temporary hold (reservedByMe)
-    reserveSeat(unit.id, seatNum);
-
-    // step 2: open confirmation popup
-    setConfirmUnitId(unit.id);
-    setConfirmSeat(seatNum);
-  } 
-  else if (state === "reservedByMe") {
-    // cancel reservation
-    cancelReservation(unit.id);
-  } 
-  else {
-    alert("Seat is already taken.");
+    if (state === "available") {
+      reserveSeat(unit.id, seatNum);
+      setConfirmUnitId(unit.id);
+      setConfirmSeat(seatNum);
+    } else if (state === "reservedByMe") {
+      cancelReservation(unit.id);
+    } else {
+      alert("Seat is already taken.");
+    }
   }
-}
 
-async function confirmReservation(unitId, seatNumber) {
-  try {
-    await runTransaction(db, async (t) => {
-      const ref = doc(db, "units", unitId);
-      const snap = await t.get(ref);
-      if (!snap.exists()) return;
+  async function confirmReservation(unitId, seatNumber) {
+    try {
+      await runTransaction(db, async (t) => {
+        const ref = doc(db, "units", unitId);
+        const snap = await t.get(ref);
+        if (!snap.exists()) return;
 
-      const data = snap.data();
-      const seats = data.seats || {};
-      const reserved = seats.reserved || {};
+        const data = snap.data();
+        const seats = data.seats || {};
+        const reserved = seats.reserved || {};
 
-      // Only allow confirm if this seat is reserved by ME
-      if (reserved[USER_ID] !== seatNumber) return;
+        if (reserved[USER_ID] !== seatNumber) return;
 
-      // Make sure the seat is inside taken[]
-      const taken = Array.isArray(seats.taken) ? seats.taken : [];
-      const newTaken = taken.includes(seatNumber) ? taken : [...taken, seatNumber];
+        const taken = Array.isArray(seats.taken) ? seats.taken : [];
+        const newTaken = taken.includes(seatNumber) ? taken : [...taken, seatNumber];
 
-      t.update(ref, {
-        [`seats.reserved.${USER_ID}`]: deleteField(), // remove temporary hold
-        "seats.taken": newTaken, // finalize as taken
+        t.update(ref, {
+          [`seats.reserved.${USER_ID}`]: deleteField(),
+          "seats.taken": newTaken,
+        });
       });
-    });
-
-  } catch (err) {
-    console.error("Confirm reservation failed:", err);
-    alert("Could not confirm reservation.");
+    } catch (err) {
+      console.error("Confirm reservation failed:", err);
+      alert("Could not confirm reservation.");
+    }
   }
-}
-
-
 
   // ----------------------------
-  // UI LAYOUT (left panel + centered map + bottom floating nav/card)
+  // UI LAYOUT (left panel + map + bottom floating)
   // ----------------------------
   return (
-    
     <div className="min-h-screen h-screen bg-[#eef2ff] flex">
-      {/* ------------------------------------------------------ */}
-      {/* TOP-RIGHT MENU (OVER MAP, ALWAYS FRONT) */}
-      {/* ------------------------------------------------------ */}
+      {/* TOP-RIGHT MENU */}
       <div className="fixed top-4 right-6 z-[999999] pointer-events-auto">
         <div className="relative">
-          {/* Avatar Button */}
           <button
             onClick={() => setMenuOpen(!menuOpen)}
             className="w-10 h-10 rounded-full border shadow bg-white flex items-center justify-center hover:scale-105 transition"
           >
-            <img
-              src="https://i.pravatar.cc/100?u=userMenu"
-              className="w-full h-full rounded-full"
-            />
+            <img src="https://i.pravatar.cc/100?u=userMenu" className="w-full h-full rounded-full" />
           </button>
 
-          {/* Dropdown Menu */}
           {menuOpen && (
             <div className="absolute right-0 mt-2 w-40 bg-white shadow-xl border rounded-lg py-1 z-[999999]">
-              <button
-                onClick={() => { setMenuOpen(false); navigate("/account"); }}
-                className="w-full text-left px-4 py-2 hover:bg-gray-100"
-              >
-                Account
-              </button>
-
-              <button
-                onClick={() => { setMenuOpen(false); navigate("/settings"); }}
-                className="w-full text-left px-4 py-2 hover:bg-gray-100"
-              >
-                Settings
-              </button>
-
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  signOut(auth).then(() => navigate("/login"));
-                }}
-                className="w-full text-left px-4 py-2 text-red-500 hover:bg-red-50"
-              >
-                Logout
-              </button>
+              <button onClick={() => { setMenuOpen(false); navigate("/account"); }} className="w-full text-left px-4 py-2 hover:bg-gray-100">Account</button>
+              <button onClick={() => { setMenuOpen(false); navigate("/settings"); }} className="w-full text-left px-4 py-2 hover:bg-gray-100">Settings</button>
+              <button onClick={() => { setMenuOpen(false); signOut(auth).then(() => navigate("/login")); }} className="w-full text-left px-4 py-2 text-red-500 hover:bg-red-50">Logout</button>
             </div>
           )}
         </div>
       </div>
-      {/* LEFT PROFILE PANEL */}
-      <aside
-        className={`transition-all bg-[#e8ffe8] border-r p-4 ${leftOpen ? "w-[380px]" : "w-0 overflow-hidden"}`}
-      >
-        {active ? (
-          <>
-            {/* Driver header */}
-            <div className="flex gap-3 mb-5">
-              <img src={active.photo ?? `https://i.pravatar.cc/150?u=${active.id}`} className="w-16 h-16 rounded-full border" />
-              <div>
-                <div className="font-bold text-lg">{active.driver}</div>
-                <div className="text-sm">{active.plate ?? active.id}</div>
-                <div className="text-xs text-gray-500">{active.route}</div>
-              </div>
-            </div>
 
-            {/* Passenger + ETA */}
-            <div className="flex gap-4 mb-6">
-              <div className="w-24 h-24 rounded-full bg-green-600 text-white flex items-center justify-center text-3xl font-bold">
-                {/* seats.taken length is current occupancy */}
-                { (active.seats && Array.isArray(active.seats.taken)) ? active.seats.taken.length : (active.seats?.occupied ?? 0) }
-              </div>
-              <div>
-                <div className="text-xs">Passengers</div>
-                <div className="text-sm mt-2 font-bold">ETA</div>
-                <div className="text-2xl font-bold">{active.eta ?? "—"}</div>
-              </div>
-            </div>
-
-            {/* Seat map */}
-            <div>
-              <div className="font-semibold text-sm">Seat Map</div>
-
-              <div className="grid grid-cols-5 gap-2 mt-2">
-                {(() => {
-                  let seatNumber = 1; // counter for REAL seats
-
-                  return Array.from({ length: active.seats?.total ?? 25 + 5 }).map((_, i) => {
-                    const col = (i % 5) + 1;
-
-                    // Column 3 = aisle
-                    if (col === 3) {
-                      return <div key={`aisle-${i}`} className="w-10 h-10"></div>;
-                    }
-
-                    // If we already used all seat numbers, stop rendering seats
-                    if (seatNumber > (active.seats?.total ?? 25)) {
-                      return <div key={`extra-${i}`} className="w-10 h-10"></div>;
-                    }
-
-                    const num = seatNumber++;
-                    const s = seatState(active, num);
-
-                    const base =
-                      "w-10 h-10 flex items-center justify-center text-xs rounded cursor-pointer select-none";
-                    let cls = "bg-white border";
-
-                    if (s === "taken") cls = "bg-blue-600 text-white";
-                    if (s === "reservedByMe") cls = "bg-green-500 text-black";
-
-                    return (
-                      <div
-                        key={num}
-                        className={`${base} ${cls}`}
-                        onClick={() => onSeatClick(active, num)}
-                        title={
-                          s === "available"
-                            ? "Click to reserve"
-                            : s === "reservedByMe"
-                            ? "Click to cancel"
-                            : "Taken"
-                        }
-                      >
-                        {num}
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
-              {/* Legend */}
-              <div className="mt-3 space-y-2 text-xs">
-
-                {/* Available */}
-                <div className="flex items-center gap-1">
-                  <div
-                    className="rounded border bg-white"
-                    style={{ width: "43px", height: "18px", display: "inline-block" }}
-                  ></div>
-                  <span>Available</span>
-                </div>
-
-                {/* Taken */}
-                <div className="flex items-center gap-1">
-                  <div
-                    className="rounded border bg-blue-600"
-                    style={{ width: "43px", height: "18px", display: "inline-block" }}
-                  ></div>
-                  <span>Taken</span>
-                </div>
-              </div>
-
-
-
-            </div>
-            {/* Buttons */}
-            <div className="mt-4 space-y-2">
-              <button onClick={() => (active.phone ? window.open(`tel:${active.phone}`) : null)} className="mt-2 py-2 bg-blue-600 text-white w-full rounded">
-                Driver Info
-              </button>
-              <button
-                onClick={() => {
-                  if (active?.lat && map.current) {
-                    try { map.current.panTo({ lat: active.lat, lng: active.lng }); map.current.setZoom(15); } catch (e) {}
-                    setLeftOpen(false);
-                  }
-                }}
-                className="mt-1 py-2 border rounded w-full"
-              >
-                Focus on Map
-              </button>
-            </div>
-          </>
-        ) : (
-          <div>No data</div>
-        )}
-      </aside>
+      
 
       {/* RIGHT MAIN CONTENT */}
       <div className="flex-1 relative flex flex-col">
-        {/* MAP CONTAINER (Centered, Card Style) */}
         <div className="flex justify-center items-center p-4 h-full">
           <div className="w-full max-w-5xl h-full bg-white shadow-xl rounded-xl overflow-hidden">
             <div id="map-container-map" className="w-full h-full" />
           </div>
         </div>
-        
-        {/* FLOATING NAVIGATION BUTTONS centered above bottom card */}
+
+        {/* FLOATING NAV */}
         <div className="fixed bottom-[140px] left-1/2 -translate-x-1/2 z-[9999]">
           <div className="flex bg-white/70 backdrop-blur-md shadow-xl rounded-full px-3 py-1 border border-white/40 gap-2">
             {[1, 2, 3].map((n) => (
@@ -696,10 +603,9 @@ async function confirmReservation(unitId, seatNumber) {
           </div>
         </div>
 
-        {/* FLOATING BOTTOM CARD */}
+        {/* BOTTOM CARD */}
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[90%] max-w-[420px] z-[9998]">
           <div className="bg-white/90 backdrop-blur-xl shadow-xl rounded-2xl p-4 border border-white/40">
-            {/* FARE */}
             {screen === 1 && (
               <div className="space-y-1 text-sm">
                 <div className="flex justify-between"><span>Bayambang → Malasiqui</span><b>₱20</b></div>
@@ -707,7 +613,6 @@ async function confirmReservation(unitId, seatNumber) {
                 <div className="flex justify-between"><span>Calasiao → Dagupan</span><b>₱30</b></div>
               </div>
             )}
-            {/* TRANSIT */}
             {screen === 2 && (
               <div className="space-y-1 text-sm max-h-[150px] overflow-y-auto">
                 {units.map((u) => (
@@ -718,7 +623,6 @@ async function confirmReservation(unitId, seatNumber) {
                 ))}
               </div>
             )}
-            {/* SCHEDULE */}
             {screen === 3 && (
               <div className="space-y-1 text-sm">
                 {Array.from({ length: 10 }).map((_, i) => (
@@ -730,14 +634,13 @@ async function confirmReservation(unitId, seatNumber) {
               </div>
             )}
           </div>
+
           {/* CONFIRMATION POPUP */}
           {confirmSeat && (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[999999]">
               <div className="bg-white p-6 rounded-xl shadow-xl w-80 text-center">
                 <h2 className="text-lg font-semibold">Confirm Seat</h2>
-                <p className="mt-2 text-gray-600">
-                  Confirm reservation for seat <b>{confirmSeat}</b>?
-                </p>
+                <p className="mt-2 text-gray-600">Confirm reservation for seat <b>{confirmSeat}</b>?</p>
 
                 <div className="mt-4 flex gap-3">
                   <button
